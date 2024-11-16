@@ -1,0 +1,9 @@
+*.egg-info
+*.py[oc]
+.venv
+/download
+__pycache__/
+build/
+dist/
+uv.lock
+wheels/
