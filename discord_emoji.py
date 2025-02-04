@@ -41,7 +41,7 @@ def clean_name_for_fs(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in " _-").strip()
 
 
-def get_guilds_info(discord_api_client: httpx.Client, task: rich.progress.TaskID) -> Iterable[dict]:
+def get_my_guilds_info(discord_api_client: httpx.Client, task: rich.progress.TaskID) -> Iterable[dict]:
     guilds_resp = discord_api_client.get("https://discord.com/api/v10/users/@me/guilds")
     guilds_resp.raise_for_status()
     guilds = guilds_resp.json()
@@ -54,6 +54,38 @@ def get_guilds_info(discord_api_client: httpx.Client, task: rich.progress.TaskID
         guild_resp.raise_for_status()
         data = guild_resp.json()
         yield guild | data
+
+
+def get_guild_infos_by_ids(
+    discord_api_client: httpx.Client,
+    guild_ids: Iterable[str],
+    task: rich.progress.TaskID,
+) -> Iterable[dict]:
+    for guild_id in progress.track(
+        guild_ids,
+        description="Fetching guild info",
+        task_id=task,
+    ):
+        guild_resp = discord_api_client.get(f"https://discord.com/api/v10/guilds/{guild_id}")
+        guild_resp.raise_for_status()
+        data = guild_resp.json()
+        yield data
+
+
+def get_guild_infos_by_source_emoji_ids(
+    discord_api_client: httpx.Client,
+    source_emoji_ids: Iterable[str],
+    task: rich.progress.TaskID,
+) -> Iterable[dict]:
+    for emoji_id in progress.track(
+        source_emoji_ids,
+        description="Fetching guild info",
+        task_id=task,
+    ):
+        guild_resp = discord_api_client.get(f"https://discord.com/api/v9/emojis/{emoji_id}/source")
+        guild_resp.raise_for_status()
+        data = guild_resp.json()
+        yield data["guild"]
 
 
 def get_downloads_from_guild_info(root_path: Path, guild: dict) -> Iterable[DownloadJob]:
@@ -102,6 +134,24 @@ def main() -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--guild-id",
+        dest="guild_ids",
+        required=False,
+        nargs="+",
+        type=int,
+        metavar="GID",
+    )
+    ap.add_argument(
+        "--source-emoji-id",
+        dest="source_emoji_ids",
+        required=False,
+        type=int,
+        nargs="+",
+        metavar="EID",
+    )
+    ap.add_argument("--my-guilds", required=False, action="store_true")
+    args = ap.parse_args()
     token_from_env = os.environ.get("DISCORD_USER_TOKEN")
     if not token_from_env:
         ap.error("DISCORD_USER_TOKEN is required")
@@ -113,7 +163,19 @@ def main() -> None:
     with rich.progress.Progress() as progress:
         with httpx.Client(headers={"Authorization": token_from_env}) as discord_api_client:
             task = progress.add_task("Fetching guilds")
-            for guild in get_guilds_info(discord_api_client, task):
+            if args.my_guilds:
+                guilds = get_my_guilds_info(discord_api_client, task)
+            elif args.guild_ids:
+                guilds = get_guild_infos_by_ids(discord_api_client, args.guild_ids, task)
+            elif args.source_emoji_ids:
+                guilds = get_guild_infos_by_source_emoji_ids(
+                    discord_api_client,
+                    args.source_emoji_ids,
+                    task,
+                )
+            else:
+                ap.error("Don't know where to get emojis from")
+            for guild in guilds:
                 jobs.extend(get_downloads_from_guild_info(root_path, guild))
                 progress.update(task, description=f"{len(jobs)} jobs so far...")
             progress.remove_task(task)
@@ -129,7 +191,7 @@ def main() -> None:
                 task = progress.add_task("Downloading")
                 with ThreadPool(3) as pool:
                     bound_download_job = partial(download_job, dl_client=dl_client)
-                    for job, status in progress.track(
+                    for job, _status in progress.track(
                         pool.imap_unordered(bound_download_job, jobs),
                         task_id=task,
                         total=len(jobs),
